@@ -1,0 +1,49 @@
+A single forward 的 wall clock ，理所当然跟专家激活数量相关 。这里将要说明 Neo PolyNorm Upcycling 方法中 ，常驻的激活专家的增加 ，不会过多地影响 wall clock ，从而也就不影响加速的结论 。
+
+以 Kimi K3.1 Pro 为例 。混合精度 。虽然 Attention 在长上下文下有上限 ，相对便宜 ；但是 ，MoE 因为是 MXFP4 ，而 Attention 之类的为 BF16 ，所以综合考量 ，
+若仍然加相当于激活参数量的 PolyNorm 2M MLP experts ，并且注意是加在 Latent MoE 的 Latent 之后 ，而不是跟本来的 shared experts 同维度 ，
+那么 ，增加的 wall clock ，大约是 20%（ 如果专家选择 top-16 变为 top-32 ，则增加 18% wall clock 。这是 Kimi K3.1 Pro 帮我算的 （ hh ） ） × 2/3 （ PolyNorm 2M MLP 之于 SwiGLU FFN 少的那一个 matrix ） ，也就是 ~ 15% 上下 。（ 这里都是估算 ，每个模型不一样 ，不存在精确的 e.g. 20% 18% ；因此刻意选择了一个还算好记的 15% 。） 
+注意相比之下我们的 Qwen3-8B （ 当然 ，这里并没有混合精度 ，因而添加 PolyNorm 2M MLP 并不大赚 ；不过这个模型的 Attention 是 GQA ，不像 Kimi K3.1 Pro 的 DSA 和 KDA 来的那样激进 ，因此也增加了 Attention 所占的 wall clock 比例 ），14.9% wall clock 增加 ，差不多也就是这个量级 。
+
+RL 加速 ，step 来看 ，≥ 2 倍 ；这个是保守的数字 。具体看 RL L 到的 Math ，整体上 2.5 倍左右 ；低于 2.5 的 ，其实就 MATH 500 一个 ；难的 bench ，尤其 Olympiad bench ，可能要 3 倍了 。OOD ，也是 3 倍 。
+然后 ，除一除 ，2.5 ➗ 1.15 。多少 ？仍然是大于 2 倍的加速 ！
+
+当然 ，非得极端一点的例子 ，Deepseek V4.1 Flash ，这个就是 Attention 极度地省 ，导致 MoE 层面基本上占了整体 wall clock 的 50% 。这样一来 ，50% × 2/3 ，那就 ~ 35% 了 。
+≥ 2.5 ➗ 1.35 ，算是贴线 2 倍吧 。不过这种本来架构就为了加速训练而极致省钱的模型 ，加速接近 2 倍 ，也很多了 。
+
+看完 《 一个更加正式的 Neo PolyNorm Upcycling 汇报 （ draft ！） 》 ，唯一的最大疑点 ，其实就是上面这个时间问题 。这个疑点解决了 ，什么 MOPD ，什么 PolyNorm 2M MLP 的添加数量是按 MoE 激活数量还是什么数量 ，其实都是板上钉钉的事情 。
+
+
+
+
+
+
+
+MOPD ，就比如说 ，如果我们拿到了 Astra 的原权重 ，假设 10% 激活 ，但是我们部署不起这么高的激活比例 ，我们只能容许 2% 。那请问 ，我们黑盒蒸馏还是白盒蒸馏 ？更何况 ，即使不同架构下 ，只要同词表 ，强模型蒸馏给弱模型 ，比如说 Qwen3-8B OPD 给 Qwen3-1.7B ，本来就是非常稀松平常的 。
+
+
+
+
+
+
+
+PolyNorm 2M MLP 的添加数量 ，个么就按照 Temporary Densification 的思路来想呀 。肯定是按照原模型的 MoE 的激活专家数 （ 大致 ） 来添加 。
+ （ Temporary Densification ，临时稠密化 ，意思是说 ，我们通过 Neo PolyNorm Upcycling ，临时 （ 约 ） 等效地增加了激活专家的数量 ，同时在稀疏激活比例下我们约等于直接让激活比例翻倍 。观察到实验过程中 ，出现了采用 NPU 相比于不采用 ，RL 结束后的 evaluation 中因撞到生成 cap 而 truncate 的更少的情况 ；因而 ，按照 “ 更高的激活比例 generally 带来更高的 token efficiency ，因为访问同样比例的模型里储存的知识 ，需要的 forward 次数更少 ” 的 naive approxiamtion ，我们的 NPU 确实起到了临时的 make model denser 的作用 。当然 ，这是一个 bold extrapolation ，因为我们当前的实验载体 ，Qwen3-8B ，本身是 dense 的模型 。 ） 
+
+
+
+
+
+
+
+进一步地 ，我们的 MoE 里面的 PolyNorm 2M MLP 的 Upcycling ，能不能各自的 epsilon 不同 ，比如说 0.1 0.05 0.03 0.01 ，这种都占一点 ？这也可能是有好处的 ！
+这是除了尝试 constant among experts 但是 swept over values 的 epsilon 以外的不同做法 。
+
+
+
+
+
+
+
+包括 ，我们有可能可以一点一点像加料一样去添加 PolyNorm 2M MLP ，比如说后训练一开始加一点 ，后面再加一点 。这个是说 ，如果一开始加一点就有效果 ，然后快速饱和 ；然后再加一点 ，又出来效果 ，又饱和 ；可以试试看如此一点一点地加 ， 跟一下子全加完 ，效果怎么样 。
+当然 ，这些都是预先设想的可能性方案 ，实际效果怎么样最好还要靠实验 。

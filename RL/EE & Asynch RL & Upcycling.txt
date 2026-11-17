@@ -1,0 +1,18 @@
+最初的 idea 是表达力工程 （ Expressivity Engineering ，or EE ） 。本身这里原 repo 说了很多 ，如何把 “ 乘起来 ” 这个动作统一为增加表达力的框架 ，不过我们当前以 multiplicative gating 来增加表达力为主 。
+在 Qwen3-8B 上面 ，利用 Is One Layer Enough 的 per layer RL effectiveness 的数据 ，来选取了最好的四层 ，做 RL 。只更新这四层 。这样比较快 （ 显存友好 ，优化器只需要存这四层 ），效果也好 。用的 Flash REINFORCE ，是 GRPO 的 Asynch RL 版本 —— 进一步加速 。
+数据集是 50k 的 Numina Math 。Math eval 从简单的 GSM8K 到 Olympiad bench 都有 。OOD eval 包括多语言数学 ，代码 （ 较难的包括 Live Code Bench ），多学科推理 （ GPQA Diamond ，问答题 ，非多选题 ，GLM-5.3-Flash 判分 ，看推理过程 ，不存在蒙对 ），等等 。
+对比 ：原生地什么都不加直接 RL ，v.s. 加一个 PolyNorm MLP （ non gating 同时中间有 low rank bottleneck ，从而借鉴 Latent MoE 的思路 。） 然后以 main × ( 1 + epsilon × tanh( side ) ) 的方式汇回 。这里 epsilon 我取了 0.03 。后者的 reward 比 vanilla 上升更多 ， Math eval 更好 ，OOD eval 也更好 。Across checkpoints 成立 （ 在对多个 checkpoints 的多个 OOD eval 中 ，仅一个 checkpoint 上的一个 OOD ， GPQA Diamond ，比 vanilla layer-selective RL 低 1.2pt ，相对于其在其他 benchmarks 其他 checkpoints 上面的增益来说很小 ，并且这不是最靠后的 checkpoint 。 ）。
+当前进度 ：表达力工程的效果被证实 。注意这和直接加一个 SwiGLU expert 然后 add 回去不一样 ，这是在原模型的 SwiGLU 的基础上又加了一个 gate 。这在尝试回答 ：额外的表达力是优化负担 ？是一定程度上的增益 ？还是净增益 ？这里得到的结论是净增益 。
+这算是对我的原 GitHub repo 里面的基于 Qwen3-1.7B 的表达力工程的一个总结和拓展 。那里得到的增益不够高 ，并且 across checkpoints 还不一定全是增益 ，只是平均下来有增益 。当时提出了各种可能的改进 ，包括防止灾难性遗忘等的各种方法 ，但其中一个假设是 ：这只是因为 Qwen3-1.7B 太小了 ，导致其对 RL 的关键贡献层不集中分布在模型的中心 。现在看来 ，这个猜想正确 ，而各种额外的脚手架 （ 比如说用 OFT 来对 Attention 层 ，之类的 ） 都是不必要的 。至少目前看来是如此 。
+
+当然 ，表达力工程的实现 ，不止这一种表现形式 。这种表现形式其实在参数上是比较贵的 。见下文 。
+然后我想 ：单就这个场景而言 ：我们是否达到了参数最优 ？同样的参数量能不能有更好的表现 ？一个直接的方法就是 ，把 multiplicative gate 换成 additive gate 。其余的不变 。也就是 main = main + epsilon × tanh( side ) 。【 当然这里注意 ，我们应当显然地可以看到 ，当我们做了 additive 的事情 ，这个就不再是表达力工程了 。这变成了纯粹的专家相加 。只不过 ，我们加的是 PolyNorm 双矩阵 MLP 的 heterogeneous 专家 。 表达力工程的其他表现形式 ，要移步到 WONN 的那条线去看了 。这里的 “ 下文 ” ，本来是要介绍 WONN 的 ，只不过 ，暂时没有耐心完整地全部写出来了 ，所以暂时不赘述 。。。。。】 
+然后诡异的来了 。这个的 reward 曲线直接飙升 ，凌驾在了所有的上面 。所有的包括 ，后续尝试了 ，side 不是加 low-rank bottleneck PolyNorm MLP ，而是加模型原大小的 SwiGLU ，或者加 low-rank bottleneck SwiGLU 其中这里的 low-rank bottleneck 与此前的 PolyNorm MLP 相等 。这就很离奇了 。PolyNorm MLP 的表达力为什么高于用了 Gated MLP 的 SwiGLU ？！！这里有两个猜测 ：一个是 PolyNorm 的 activation ，表达力实在太强 ，以至于高过了 SwiGLU 整体 ；但是存疑 ，因为 PolyNorm 的原论文并没有用此来代替 Gating mechanism 本身 ！另一个猜测是 ，heterogeneous expert 。关键在于我们加的这个 expert 和主干 * 不同 * 。
+具体的成因 ，需要以后更多的实验 。但总之目前观察到的是 ，这种形式的 （ 等价于专家添加 ，也就是 Upcylcing ） 做法 ，把 RL 相对于 vanilla layer selective RL 提升了 ≥ 2 × ，相对于 vanilla layer-blind RL 则更多 。
+
+这会是一个通用的 RL 加速技术 ！因为我们对于什么什么 PO 是 agnoistic 的 。换成什么 PPO ，什么什么 PO ，照样适用 （ 当然 ，PPO 我没做过 ，可以简单试一下 。 ） 。
+具体做法是 ：对于一个大模型 ，先按照 Is One Layer Enough 论文的做法 ，把 RL 最好的层给找出来 。当然我们这里可以更聪明一点 ，我们每一个层都是加上 Upcycling 来找 ，这样信号出现得更快 ！
+找到以后 ，对于 Top-K 个关键层 ，进行 Upcycling and RL ，然后得到的模型 ，我们再蒸馏回主模型 ，MOPD 。蒸馏回去以后如此往复 。
+为什么要有蒸馏这一步 ？因为谷歌之前的一个 CPT 阶段的 Upcycling 文章显示 ，每一波 ，专家的数量要翻倍 。当然我们这里我估计添加的数量 ~ 激活数量就行 ，因为我们的添加是每一次都要参与的 ，不是添加到专家池里面等待 router 选择 。所以也没有重 routing 的问题 。
+我担心我们如果不做蒸馏汇回 ，我们到了后面为了 RL 提效 ，加的专家也越来越膨胀 。我做了实验 ，当前加一个 PolyNorm MLP 提升很多 ，中途再加第二个 ，就提升没那么多了 。当然 ，我们还可以试验 ：如果加更多的异质专家 ？第三个如果加既不是 SwiGLU 也不是 Non gating 的 MLP 的 ，会不会挽救我们的效果 ？这个不知道目前 ，是一个公开问题 。可以继续探索 。
+蒸馏的另一个原因是 ，希望最后部署的时候不要额外带很多的 FLOPS 。无论如何 ，关于 wall clock 的讨论 ，见本目录下的 额外.txt 。
